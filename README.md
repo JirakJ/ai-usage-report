@@ -12,7 +12,11 @@ python3 usage_report.py --csv out.csv --json out.json
 python3 usage_report.py --pricing prices.json
 ```
 
-Output: a per-project table and a "Utilization by model" table (tokens, USD, share).
+Output: boxed, colour-coded tables with a cost-share bar: per project, per model
+(all projects) and, with `--models`, model per project. Colours are used only on a
+terminal (respects `NO_COLOR`).
+
+![Example output: utilization by model](docs/example-output.png)
 
 ## Pricing
 

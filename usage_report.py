@@ -323,16 +323,7 @@ def fmt_tokens(n: int) -> str:
     return str(n)
 
 
-def render_table(rows: list[list[str]], header: list[str], right: set[int]) -> str:
-    widths = [max(len(str(r[i])) for r in [header] + rows) for i in range(len(header))]
-
-    def line(r: list[str]) -> str:
-        return "  ".join(str(c).rjust(widths[i]) if i in right else str(c).ljust(widths[i])
-                         for i, c in enumerate(r))
-    sep = "  ".join("-" * w for w in widths)
-    return "\n".join([line(header), sep] + [line(r) for r in rows])
-
-
+PALETTE = ["1;35", "1;36", "1;32", "1;33", "1;34", "1;31"]
 USE_COLOR = sys.stdout.isatty() and "NO_COLOR" not in os.environ
 
 
@@ -369,6 +360,11 @@ def render_box(header: list[str], rows: list[list[str]], right: set[int],
         out += [rule("├", "┼", "┤"), cells(footer, "1")]
     out.append(rule("└", "┴", "┘"))
     return "\n".join(out)
+
+
+def shorten(text: str, width: int = 44) -> str:
+    """Keep the tail of long paths (the informative part), e.g. '…/worktrees/name'."""
+    return text if len(text) <= width else "…" + text[-(width - 1):]
 
 
 def cache_write(u: Usage) -> int:
@@ -422,54 +418,51 @@ def main() -> int:
     for p in ordered:
         total.add(p.usage)
 
-    header = ["Project", "Src", "Sess", "Msgs", "Input", "Output", "CacheW", "CacheR", "Total", "USD"]
-    right = set(range(2, 10))
-    rows = [[p.name, "+".join(sorted(p.sources)), str(len(p.sessions)), str(p.usage.messages),
-             fmt_tokens(p.usage.input), fmt_tokens(p.usage.output),
-             fmt_tokens(cache_write(p.usage)), fmt_tokens(p.usage.cache_read),
-             fmt_tokens(p.usage.total), f"{p.usage.cost:,.2f}"] for p in ordered]
-    rows.append(["TOTAL", "", str(sum(len(p.sessions) for p in ordered)), str(total.messages),
-                 fmt_tokens(total.input), fmt_tokens(total.output),
-                 fmt_tokens(cache_write(total)), fmt_tokens(total.cache_read),
-                 fmt_tokens(total.total), f"{total.cost:,.2f}"])
+    def usage_cells(u: Usage) -> list[str]:
+        return [f"{u.messages:,}", fmt_tokens(u.input), fmt_tokens(u.output),
+                fmt_tokens(cache_write(u)), fmt_tokens(u.cache_read), fmt_tokens(u.total),
+                f"${u.cost:,.2f}"]
 
-    print(f"\nAI coding usage, last {args.days} days "
+    def share_cells(u: Usage) -> list[str]:
+        frac = u.cost / total.cost if total.cost else 0.0
+        return [f"{frac * 100:.1f}%", bar(frac)]
+
+    usage_header = ["Msgs", "Input", "Output", "CacheW", "CacheR", "Total", "Cost",
+                    "Share", "Cost share"]
+    total_share = ["100.0%" if total.cost else "0.0%", ""]
+
+    print(f"\n{paint('AI coding usage by project', '1')}, last {args.days} days "
           f"(since {since.astimezone().strftime('%Y-%m-%d %H:%M')})\n")
-    print(render_table(rows, header, right))
+    prows = [[shorten(p.name), "+".join(sorted(p.sources)), f"{len(p.sessions):,}"]
+             + usage_cells(p.usage) + share_cells(p.usage) for p in ordered]
+    pfoot = ["TOTAL", "", f"{sum(len(p.sessions) for p in ordered):,}"] \
+        + usage_cells(total) + total_share
+    print(render_box(["Project", "Src", "Sess"] + usage_header, prows, set(range(2, 11)),
+                     [PALETTE[n % len(PALETTE)] for n in range(len(prows))], pfoot))
 
     by_model: dict[str, Usage] = defaultdict(Usage)
     for p in ordered:
         for model, u in p.models.items():
             by_model[model].add(u)
-    palette = ["1;35", "1;36", "1;32", "1;33", "1;34", "1;31"]
-    srows, scolors = [], []
     ranked = sorted(by_model.items(), key=lambda kv: (kv[1].cost, kv[1].total), reverse=True)
-    for n, (model, u) in enumerate(ranked):
-        frac = u.cost / total.cost if total.cost else 0.0
-        srows.append([model + ("*" if model in ledger.unpriced_models else ""),
-                      f"{u.messages:,}", fmt_tokens(u.input), fmt_tokens(u.output),
-                      fmt_tokens(cache_write(u)), fmt_tokens(u.cache_read),
-                      fmt_tokens(u.total), f"${u.cost:,.2f}", f"{frac * 100:.1f}%", bar(frac)])
-        scolors.append(palette[n % len(palette)])
-    footer = ["TOTAL", f"{total.messages:,}", fmt_tokens(total.input), fmt_tokens(total.output),
-              fmt_tokens(cache_write(total)), fmt_tokens(total.cache_read),
-              fmt_tokens(total.total), f"${total.cost:,.2f}", "100.0%", ""]
+    mrows = [[m + ("*" if m in ledger.unpriced_models else "")] + usage_cells(u) + share_cells(u)
+             for m, u in ranked]
     print("\n" + paint("Utilization by model (all projects)", "1") + "\n")
-    print(render_box(["Model", "Msgs", "Input", "Output", "CacheW", "CacheR", "Total",
-                      "Cost", "Share", "Cost share"], srows, set(range(1, 9)), scolors, footer))
+    print(render_box(["Model"] + usage_header, mrows, set(range(1, 9)),
+                     [PALETTE[n % len(PALETTE)] for n in range(len(mrows))],
+                     ["TOTAL"] + usage_cells(total) + total_share))
     if ledger.unpriced_models:
         print("* no price, counted as $0")
 
     if args.models:
-        print("\nPer-model breakdown\n")
-        mrows = []
-        for p in ordered:
+        print("\n" + paint("Per-project model breakdown", "1") + "\n")
+        brows, bcolors = [], []
+        for n, p in enumerate(ordered):
             for model, u in sorted(p.models.items(), key=lambda kv: kv[1].cost, reverse=True):
-                mrows.append([p.name, model, str(u.messages), fmt_tokens(u.input),
-                              fmt_tokens(u.output), fmt_tokens(cache_write(u)),
-                              fmt_tokens(u.cache_read), f"{u.cost:,.2f}"])
-        print(render_table(mrows, ["Project", "Model", "Msgs", "Input", "Output",
-                                   "CacheW", "CacheR", "USD"], set(range(2, 8))))
+                brows.append([shorten(p.name), model] + usage_cells(u) + share_cells(u))
+                bcolors.append(PALETTE[n % len(PALETTE)])
+        print(render_box(["Project", "Model"] + usage_header, brows, set(range(2, 10)), bcolors,
+                         ["TOTAL", ""] + usage_cells(total) + total_share))
 
     if ledger.unpriced_models:
         print(f"\nNOTE: no price for {', '.join(sorted(ledger.unpriced_models))}; those tokens "
